@@ -1,0 +1,93 @@
+defaults:
+  - _self_
+hydra:
+  run:
+    dir: ${logdir}
+_target_: agent.eval.eval_d3p_diffusion_agent.EvalD3PDiffusionAgent
+
+name: ${env_name}_eval_d3p_diffusion_mlp_ta${horizon_steps}_td${denoising_steps}_tdf${ft_denoising_steps}
+logdir: ${oc.env:DPPO_LOG_DIR}/robomimic-eval/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+
+base_policy_path: log/robomimic-finetune/lift_ft_diffusion_mlp_noisy_ta4_td20_tdf10/2026-06-06_16-13-36_42/checkpoint/state_70.pt
+adaptor_path: log/robomimic-finetune/lift_ft_diffusion_mlp_noisy_ta4_td20_tdf10/2026-06-06_16-13-36_42/checkpoint/adaptor_70.pt
+
+
+robomimic_env_cfg_path: cfg/robomimic/env_meta/${env_name}.json
+normalization_path: ${oc.env:DPPO_DATA_DIR}/robomimic/${env_name}/normalization.npz
+
+seed: 42
+device: cuda:0
+env_name: lift
+obs_dim: 19
+action_dim: 7
+denoising_steps: 20
+ft_denoising_steps: 10 
+cond_steps: 1
+horizon_steps: 4
+act_steps: 4
+
+n_steps: 300  # max env-steps per eval episode (max_episode_steps / act_steps)
+render_num: 0
+
+env:
+  n_envs: 50
+  name: ${env_name}
+  best_reward_threshold_for_success: 1
+  max_episode_steps: 300
+  save_video: False
+  wrappers:
+    robomimic_lowdim:
+      normalization_path: ${normalization_path}
+      low_dim_keys: ['robot0_eef_pos',
+                    'robot0_eef_quat',
+                    'robot0_gripper_qpos',
+                    'object']
+    object_kick:
+      p: 0.2              # per-step probability of a kick (set >0 to enable)
+      impulse_sigma: 0.3  # wind strength
+      target_joint_name: cube_joint0
+      apply_z: False      # if False, kick only in xy (horizontal "wind")
+      clip_magnitude: 1.0 # |impulse| cap per axis (m/s); set null to disable
+
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: True
+
+model:
+  _target_: model.diffusion.diffusion_ppo.PPODiffusion
+  gamma_denoising: 0.99
+  clip_ploss_coef: 0.01
+  clip_ploss_coef_base: 0.001
+  clip_ploss_coef_rate: 3
+  randn_clip_value: 3
+  min_sampling_denoising_std: 0.1
+  min_logprob_denoising_std: 0.1
+  # D3P forward path requires DDIM.
+  use_ddim: True
+  network_path: ${base_policy_path}
+  actor:
+    _target_: model.diffusion.mlp_diffusion.DiffusionMLP
+    time_dim: 16
+    mlp_dims: [512, 512, 512]
+    residual_style: True
+    cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
+    horizon_steps: ${horizon_steps}
+    action_dim: ${action_dim}
+  critic:
+    _target_: model.common.critic.CriticObs
+    mlp_dims: [256, 256, 256]
+    activation_type: Mish
+    residual_style: True
+    cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
+  ft_denoising_steps: ${ft_denoising_steps}
+  horizon_steps: ${horizon_steps}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  denoising_steps: ${denoising_steps}
+  ddim_steps: ${denoising_steps}
+  device: ${device}
+
+d3p:
+  mlp_dims: [128, 128]

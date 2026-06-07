@@ -1,0 +1,107 @@
+defaults:
+  - _self_
+hydra:
+  run:
+    dir: ${logdir}
+_target_: agent.eval.eval_d3p_replan_agent.EvalD3PReplanAgent
+
+name: ${env_name}_eval_d3p_diffusion_mlp_ta${horizon_steps}_td${denoising_steps}_tdf${ft_denoising_steps}
+logdir: ${oc.env:DPPO_LOG_DIR}/robomimic-eval/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+
+base_policy_path: ${oc.env:DPPO_LOG_DIR}/robomimic-finetune/can_ft_diffusion_mlp_noisy_ta4_td20_tdf10/2026-06-06_13-15-16_42/checkpoint/state_120.pt
+adaptor_path: ${oc.env:DPPO_LOG_DIR}/robomimic-finetune/can_ft_diffusion_mlp_noisy_ta4_td20_tdf10/2026-06-06_13-15-16_42/checkpoint/adaptor_120.pt
+
+
+robomimic_env_cfg_path: cfg/robomimic/env_meta/${env_name}.json
+normalization_path: ${oc.env:DPPO_DATA_DIR}/robomimic/${env_name}/normalization.npz
+
+seed: 42
+device: cuda:0
+env_name: can
+obs_dim: 23
+action_dim: 7
+denoising_steps: 20
+cond_steps: 1
+horizon_steps: 4
+act_steps: 1
+ft_denoising_steps: 10
+
+n_steps: 1200  # each episode takes max_episode_steps / act_steps steps
+render_num: 0
+
+# TD-residual replan trigger.
+# Trigger fires when the (pooled-EMA-) z-scored TD residual δ = r + γ V(s') − V(s)
+# falls below −tau, indicating an unexpectedly bad transition.
+replan:
+  tau: 2.0              # z-score threshold
+  ema_alpha: 0.02       # EMA decay for pooled (μ_δ, σ_δ)
+  # SDEdit-style warm start: when trigger fires mid-chunk, sample the new chunk
+  # by denoising from a noised version of the old chunk's remaining actions
+  # instead of pure noise. Biases new chunk to stay in the old mode.
+  warm_start:
+    enabled: false      # off by default;
+    t_frac: 0.5         # 1.0 ≈ baseline, 0.5 medium continuity, 0.2 strong continuity
+  warmup_steps: 200     # number of valid δ samples before trigger is allowed
+  gamma: 0.99           # TD discount; should match training cfg
+  max_chunk_steps: ${horizon_steps}  # forced replan after this many actions even if no trigger
+
+env:
+  n_envs: 50
+  name: ${env_name}
+  best_reward_threshold_for_success: 1
+  max_episode_steps: 300
+  save_video: False
+  wrappers:
+    robomimic_lowdim:
+      normalization_path: ${normalization_path}
+      low_dim_keys: ['robot0_eef_pos',
+                    'robot0_eef_quat',
+                    'robot0_gripper_qpos',
+                    'object']
+    object_kick:
+      p: 0.2
+      impulse_sigma: 0.2
+      target_joint_name: Can_joint0   # NOTE: cfg/.../eval_d3p_replan_diffusion_mlp.yaml had 'cube_joint0' (lift task); can task uses Can_joint0
+      apply_z: False
+      clip_magnitude: 1.0
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: True
+
+model:
+  _target_: model.diffusion.diffusion_ppo.PPODiffusion
+  gamma_denoising: 0.99
+  clip_ploss_coef: 0.01
+  clip_ploss_coef_base: 0.001
+  clip_ploss_coef_rate: 3
+  randn_clip_value: 3
+  min_sampling_denoising_std: 0.1
+  min_logprob_denoising_std: 0.1
+  use_ddim: True
+  network_path: ${base_policy_path}
+  actor:
+    _target_: model.diffusion.mlp_diffusion.DiffusionMLP
+    time_dim: 16
+    mlp_dims: [512, 512, 512]
+    residual_style: True
+    cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
+    horizon_steps: ${horizon_steps}
+    action_dim: ${action_dim}
+  critic:
+    _target_: model.common.critic.CriticObs
+    mlp_dims: [256, 256, 256]
+    activation_type: Mish
+    residual_style: True
+    cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
+  ft_denoising_steps: ${ft_denoising_steps}
+  horizon_steps: ${horizon_steps}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  denoising_steps: ${denoising_steps}
+  ddim_steps: ${denoising_steps}
+  device: ${device}
+
+d3p:
+  mlp_dims: [128, 128]

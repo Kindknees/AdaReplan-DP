@@ -1,0 +1,153 @@
+defaults:
+  - _self_
+hydra:
+  run:
+    dir: ${logdir}
+_target_: agent.finetune.train_replan_controller_agent.TrainReplanControllerAgent
+
+name: ${env_name}_replan_controller_mlp_ta${horizon_steps}_td${denoising_steps}_tdf${ft_denoising_steps}
+logdir: ${oc.env:DPPO_LOG_DIR}/robomimic-finetune/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+
+# base_policy_path: ${oc.env:DPPO_LOG_DIR}/robomimic-pretrain/can/can_pre_diffusion_mlp_ta4_td20/2024-06-28_13-29-54/checkpoint/state_5000.pt  # use 5000 for comparing diffusion rl algorithms
+base_policy_path: ${oc.env:DPPO_LOG_DIR}/robomimic-finetune/can_ft_diffusion_mlp_ta4_td20_tdf10/2026-05-25_12-18-18_42/checkpoint/state_199.pt  # use 8000 for comparing policy parameterizations
+adaptor_path: ${oc.env:DPPO_LOG_DIR}/robomimic-finetune/can_ft_diffusion_mlp_ta4_td20_tdf10/2026-05-25_12-18-18_42/checkpoint/adaptor_199.pt
+
+robomimic_env_cfg_path: cfg/robomimic/env_meta/${env_name}.json
+normalization_path: ${oc.env:DPPO_DATA_DIR}/robomimic/${env_name}/normalization.npz
+
+seed: 42
+device: cuda:0
+env_name: can
+obs_dim: 23
+action_dim: 7
+denoising_steps: 20
+ft_denoising_steps: 10
+cond_steps: 1
+horizon_steps: 4
+act_steps: 1
+
+env:
+  n_envs: 50
+  name: ${env_name}
+  best_reward_threshold_for_success: 1
+  max_episode_steps: 300
+  save_video: False
+  wrappers:
+    robomimic_lowdim:
+      normalization_path: ${normalization_path}
+      low_dim_keys: ['robot0_eef_pos',
+                    'robot0_eef_quat',
+                    'robot0_gripper_qpos',
+                    'object']
+    object_kick:
+      p: 0.2              # per-step probability of a kick (set >0 to enable)
+      impulse_sigma: 0.2  # "wind strength" — stddev of velocity impulse in m/s
+      target_joint_name: Can_joint0
+      apply_z: False      # if False, kick only in xy (horizontal "wind")
+      clip_magnitude: 1.0 # |impulse| cap per axis (m/s); set null to disable
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: True
+
+wandb:
+  entity: ${oc.env:DPPO_WANDB_ENTITY}
+  project: robomimic-${env_name}-finetune
+  run: ${now:%H-%M-%S}_${name}
+
+train:
+  n_train_itr: 200
+  n_critic_warmup_itr: 2
+  n_steps: 300
+  gamma: 0.999
+  actor_lr: 1e-4
+  actor_weight_decay: 0
+  actor_lr_scheduler:
+    first_cycle_steps: ${train.n_train_itr}
+    warmup_steps: 10
+    min_lr: 1e-4
+  critic_lr: 1e-3
+  critic_weight_decay: 0
+  critic_lr_scheduler:
+    first_cycle_steps: ${train.n_train_itr}
+    warmup_steps: 10
+    min_lr: 1e-3
+  save_model_freq: 10
+  val_freq: 10
+  render:
+    freq: 1
+    num: 0
+  # PPO specific
+  reward_scale_running: True
+  reward_scale_const: 1.0
+  gae_lambda: 0.95
+  batch_size: 7500
+  update_epochs: 10
+  vf_coef: 0.5
+  target_kl: 1
+
+model:
+  _target_: model.diffusion.diffusion_ppo.PPODiffusion
+  # HP to tune
+  gamma_denoising: 0.99
+  clip_ploss_coef: 0.01
+  clip_ploss_coef_base: 0.001
+  clip_ploss_coef_rate: 3
+  randn_clip_value: 3
+  min_sampling_denoising_std: 0.1
+  min_logprob_denoising_std: 0.1
+  # d3p must to use ddim
+  use_ddim: True
+  network_path: ${base_policy_path}
+  actor:
+    _target_: model.diffusion.mlp_diffusion.DiffusionMLP
+    time_dim: 16
+    mlp_dims: [512, 512, 512]
+    residual_style: True
+    cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
+    horizon_steps: ${horizon_steps}
+    action_dim: ${action_dim}
+  critic:
+    _target_: model.common.critic.CriticObs
+    mlp_dims: [256, 256, 256]
+    activation_type: Mish
+    residual_style: True
+    cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
+  ft_denoising_steps: ${ft_denoising_steps}
+  horizon_steps: ${horizon_steps}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  denoising_steps: ${denoising_steps}
+  ddim_steps: ${denoising_steps}
+  device: ${device}
+
+
+# D3P adaptor
+d3p:
+  mlp_dims: [128, 128]
+
+# RL replan controller (the only trained module)
+controller:
+  mlp_dims: [128, 128]
+  lr: 3e-4
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip: 0.2
+  # --- Entropy annealing (P2) ---
+  # Old ent_coef=0.01 is too small to overpower the cost-of-replan gradient
+  # that collapses the policy to "never voluntary replan". Start at 0.05
+  # and linearly decay to 0.005 over `ent_anneal_end_itr` iterations so the
+  # policy stays exploratory early and sharpens late.
+  ent_coef: 0.05             # initial entropy bonus (was 0.01)
+  ent_coef_final: 0.005      # final entropy bonus after annealing
+  ent_anneal_end_itr: 150    # itr at which ent_coef reaches ent_coef_final
+  vf_coef: 0.5
+  max_grad_norm: 10.0
+  # --- Init bias (P3) ---
+  # Old -1.0 gave the policy a head start in the direction it collapses to
+  # anyway. Start uniform so PPO actually has to do work to push toward 0.
+  init_replan_bias: 0.0      # sigmoid(0) = 0.5 — uniform starting point (was -1.0)
+  replan_cost: 0.005         # lambda: reward penalty per NFE (was 0.07)
+  use_dynamic_nfe: True      # replans use D3P forward_d3p (dynamic NFE)
+  max_chunk_steps: ${horizon_steps}

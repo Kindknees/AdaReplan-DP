@@ -1,0 +1,103 @@
+defaults:
+  - _self_
+hydra:
+  run:
+    dir: ${logdir}
+_target_: agent.eval.eval_replan_controller_agent.EvalReplanControllerAgent
+
+name: ${env_name}_eval_replan_controller_mlp_ta${horizon_steps}_td${denoising_steps}_tdf${ft_denoising_steps}
+logdir: ${oc.env:DPPO_LOG_DIR}/robomimic-eval/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+
+# Frozen base diffusion policy + critic
+base_policy_path: ${oc.env:DPPO_LOG_DIR}/robomimic-finetune/lift_ft_diffusion_mlp_ta4_td20_tdf10/episode_299/checkpoint/state_299.pt
+# Frozen D3P adaptor
+adaptor_path: ${oc.env:DPPO_LOG_DIR}/robomimic-finetune/lift_ft_diffusion_mlp_ta4_td20_tdf10/episode_299/checkpoint/adapter_299.pt
+# Trained replan controller
+controller_path: ${oc.env:DPPO_LOG_DIR}/robomimic-finetune/lift_replan_controller_mlp_ta4_td20_tdf10/EDIT_ME/checkpoint/controller_199.pt
+
+robomimic_env_cfg_path: cfg/robomimic/env_meta/${env_name}.json
+normalization_path: ${oc.env:DPPO_DATA_DIR}/robomimic/${env_name}/normalization.npz
+
+seed: 42
+device: cuda:0
+env_name: lift
+obs_dim: 19
+action_dim: 7
+denoising_steps: 20
+ft_denoising_steps: 10
+cond_steps: 1
+horizon_steps: 4
+act_steps: 1            # MUST be 1 — per-step trigger decision
+
+n_steps: 1200
+render_num: 0
+
+env:
+  n_envs: 50
+  name: ${env_name}
+  best_reward_threshold_for_success: 1
+  max_episode_steps: 300
+  save_video: False
+  wrappers:
+    robomimic_lowdim:
+      normalization_path: ${normalization_path}
+      low_dim_keys: ['robot0_eef_pos',
+                    'robot0_eef_quat',
+                    'robot0_gripper_qpos',
+                    'object']
+    object_kick:
+      p: 0.2               # per-step kick probability (~15 kicks over 300 steps)
+      impulse_sigma: 0.2    # m/s stddev per axis
+      target_joint_name: cube_joint0   # the lift task's cube
+      apply_z: False        # XY plane only — vertical kicks just bounce
+      clip_magnitude: 1.0
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: True
+
+model:
+  _target_: model.diffusion.diffusion_ppo.PPODiffusion
+  gamma_denoising: 0.99
+  clip_ploss_coef: 0.01
+  clip_ploss_coef_base: 0.001
+  clip_ploss_coef_rate: 3
+  randn_clip_value: 3
+  min_sampling_denoising_std: 0.1
+  min_logprob_denoising_std: 0.1
+  use_ddim: True
+  network_path: ${base_policy_path}
+  actor:
+    _target_: model.diffusion.mlp_diffusion.DiffusionMLP
+    time_dim: 16
+    mlp_dims: [512, 512, 512]
+    residual_style: True
+    cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
+    horizon_steps: ${horizon_steps}
+    action_dim: ${action_dim}
+  critic:
+    _target_: model.common.critic.CriticObs
+    mlp_dims: [256, 256, 256]
+    activation_type: Mish
+    residual_style: True
+    cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
+  ft_denoising_steps: ${ft_denoising_steps}
+  horizon_steps: ${horizon_steps}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  denoising_steps: ${denoising_steps}
+  ddim_steps: ${denoising_steps}
+  device: ${device}
+
+d3p:
+  mlp_dims: [128, 128]
+
+controller:
+  mlp_dims: [128, 128]
+  init_replan_bias: -1.0
+  use_dynamic_nfe: True
+  max_chunk_steps: ${horizon_steps}
+  decision_mode: deterministic   # "deterministic" (p > threshold) or "stochastic"
+  decision_threshold: 0.5
+  gamma: 0.999

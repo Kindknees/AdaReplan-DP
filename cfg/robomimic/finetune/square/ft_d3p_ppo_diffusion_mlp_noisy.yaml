@@ -1,0 +1,189 @@
+defaults:
+  - _self_
+hydra:
+  run:
+    dir: ${logdir}
+_target_: agent.finetune.train_d3p_ppo_diffusion_agent.TrainD3PPPODiffusionAgent
+
+# "Noisy" D3P fine-tuning — designed to match the deployment regime used by
+# the replan eval (mid-chunk replan + state disturbance).
+#
+# Training scheme: per-chunk random force-replan.
+#   Each outer step the diffusion samples a full horizon_steps-long chunk,
+#   but the MultiStep wrapper truncates execution to a uniformly random
+#   t ∈ {1, ..., horizon_steps} sub-steps before returning. Next outer step
+#   samples a fresh chunk → so the chunk is implicitly interrupted at a
+#   random position. This closes two gaps simultaneously vs the base cfg:
+#
+#   1. Mid-chunk state distribution. The next chunk-sample state is "after
+#      executing t fresh-chunk-actions" with t random in {1..H}, which
+#      matches what the oracle / TD / learned-controller replan triggers
+#      see at deployment.
+#
+#   2. Chunk internal action quality. With t=1 only action 0 contributes to
+#      reward (act_steps=1 baseline); with t=2,3,4 actions 1,2,3 also
+#      execute and contribute. Across the rollout the PPO advantage signal
+#      reaches all four chunk positions — addressing the concern that
+#      act_steps=1 training leaves chunk positions 1..H-1 weakly optimized.
+#
+# Disturbance wrappers (object_kick, action_noise, obs_delay) are wired in
+# at the same values used by the replan eval so the train/eval state
+# distributions overlap.
+#
+# To recover the previous act_steps=1 "always replan" training, set
+# multi_step.random_n_action_steps=False and act_steps=1.
+
+name: ${env_name}_ft_diffusion_mlp_noisy_ta${horizon_steps}_td${denoising_steps}_tdf${ft_denoising_steps}
+logdir: ${oc.env:DPPO_LOG_DIR}/robomimic-finetune/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+
+base_policy_path: ${oc.env:DPPO_LOG_DIR}/robomimic-pretrain/can/can_pre_diffusion_mlp_ta4_td20/2024-06-28_13-29-54/checkpoint/state_8000.pt
+# base_policy_path: /workspace/D3P/ta8_models/can/can_ta8_pretrain_state_3000.pt
+
+robomimic_env_cfg_path: cfg/robomimic/env_meta/${env_name}.json
+normalization_path: ${oc.env:DPPO_DATA_DIR}/robomimic/${env_name}/normalization.npz
+
+seed: 42
+device: cuda:0
+env_name: square
+obs_dim: 23
+action_dim: 7
+denoising_steps: 20
+ft_denoising_steps: 10
+cond_steps: 1
+horizon_steps: 4
+# act_steps is the MAX number of chunk actions executed per outer step.
+# With multi_step.random_n_action_steps=True (set below) the wrapper draws
+# a per-step random t ∈ [multi_step.min_n_action_steps, act_steps] and
+# truncates execution to t sub-steps. With act_steps=horizon_steps=4 and
+# min_n_action_steps=1, t is uniform over {1,2,3,4} and the per-chunk
+# average env-step count is 2.5.
+act_steps: 4
+
+env:
+  n_envs: 50
+  name: ${env_name}
+  best_reward_threshold_for_success: 1
+  max_episode_steps: 400
+  save_video: False
+  wrappers:
+    robomimic_lowdim:
+      normalization_path: ${normalization_path}
+      low_dim_keys: ['robot0_eef_pos',
+                    'robot0_eef_quat',
+                    'robot0_gripper_qpos',
+                    'object']
+    # Disturbance wrappers. Match the values used in the replan eval cfg
+    # so train and eval state distributions overlap. CLI override any value
+    # to sweep; keep p=0 to disable a specific channel.
+    object_kick:
+      p: 0.2              # per-step probability of a kick
+      impulse_sigma: 0.2  # impulse stddev (m/s) — "wind strength"
+      target_joint_name: Can_joint0   # NOTE: 'cube_joint0' is Lift's joint; Can uses 'Can_joint0'
+      apply_z: False
+      clip_magnitude: 1.0
+    action_noise:
+      sigma: 0.0          # actuator noise — keep off by default; sweep e.g. 0.1
+      p: 0.0
+      clip: True
+    # obs_delay:
+    #   p: 0.0              # IoT stale-obs probability — enable for IoT scenarios
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: True
+      # Per-chunk random force-replan: truncate each chunk to a uniformly
+      # random t in [min_n_action_steps, n_action_steps] sub-steps before
+      # the env loop returns. The next outer step samples a fresh chunk →
+      # effective "replan at random t". Disable by setting False.
+      random_n_action_steps: True
+      min_n_action_steps: 1
+
+wandb:
+  entity: ${oc.env:DPPO_WANDB_ENTITY}
+  project: robomimic-${env_name}-finetune
+  run: ${now:%H-%M-%S}_${name}
+
+train:
+  n_train_itr: 400
+  n_critic_warmup_itr: 2
+  # With random_n_action_steps=True and act_steps=4 the per-outer-step
+  # env-step count is uniform in {1,2,3,4}, average 2.5. n_steps=1200
+  # outer steps -> ~3000 env sub-steps per env per iteration (vs 1200 in
+  # the old act_steps=1 cfg, vs 1200 in the base act_steps=4 cfg). PPO
+  # transition count is still 1200/env/iter (1 outer step = 1 chunk
+  # sample = 1 PPO transition), so the update batch size is unchanged;
+  # only env throughput goes up. Drop to 600 if compute is tight.
+  n_steps: 300
+  gamma: 0.999
+  actor_lr: 1e-4
+  actor_weight_decay: 0
+  actor_lr_scheduler:
+    first_cycle_steps: ${train.n_train_itr}
+    warmup_steps: 10
+    min_lr: 1e-4
+  critic_lr: 1e-3
+  critic_weight_decay: 0
+  critic_lr_scheduler:
+    first_cycle_steps: ${train.n_train_itr}
+    warmup_steps: 10
+    min_lr: 1e-3
+  save_model_freq: 10
+  val_freq: 10
+  render:
+    freq: 1
+    num: 0
+  # PPO specific
+  reward_scale_running: True
+  reward_scale_const: 1.0
+  gae_lambda: 0.95
+  batch_size: 7500
+  update_epochs: 10
+  vf_coef: 0.5
+  target_kl: 1
+
+model:
+  _target_: model.diffusion.diffusion_ppo.PPODiffusion
+  # HP to tune
+  gamma_denoising: 0.99
+  clip_ploss_coef: 0.01
+  clip_ploss_coef_base: 0.001
+  clip_ploss_coef_rate: 3
+  randn_clip_value: 3
+  min_sampling_denoising_std: 0.1
+  min_logprob_denoising_std: 0.1
+  # d3p must to use ddim
+  use_ddim: True
+  network_path: ${base_policy_path}
+  actor:
+    _target_: model.diffusion.mlp_diffusion.DiffusionMLP
+    time_dim: 16
+    mlp_dims: [512, 512, 512]
+    residual_style: True
+    cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
+    horizon_steps: ${horizon_steps}
+    action_dim: ${action_dim}
+  critic:
+    _target_: model.common.critic.CriticObs
+    mlp_dims: [256, 256, 256]
+    activation_type: Mish
+    residual_style: True
+    cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
+  ft_denoising_steps: ${ft_denoising_steps}
+  horizon_steps: ${horizon_steps}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  denoising_steps: ${denoising_steps}
+  ddim_steps: ${denoising_steps}
+  device: ${device}
+
+d3p:
+  adaptor_lr: 1e-4
+  mlp_dims: [128, 128]
+
+  zeta1: 170.0  # Threshold for Stage 1 to Stage 2
+  zeta2: 4.0    # Threshold for Stage 2 to Stage 3
+
+  gamma_s: 0.95
+  alpha: 1.0
+  beta: 0.2
