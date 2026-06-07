@@ -1,4 +1,4 @@
-# AdaReplan-DP: Adaptive Replanning for Diffusion Policies via Reinforcement Learning
+# Adaptive Replanner in Diffusion Policy via Reinforcement Learning
 
 [Website](https://koukanni.github.io/adaptive-replanner/)
 
