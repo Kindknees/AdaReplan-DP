@@ -1,4 +1,6 @@
-# AdaReplan-DP: Closed-Loop Adaptive Replanning for Diffusion Policies
+# AdaReplan-DP: Adaptive Replanning for Diffusion Policies via Reinforcement Learning
+
+[Website](https://koukanni.github.io/adaptive-replanner/)
 
 ## Authors & Contributors
 黃冠瑋、鄭芯薇、黃浚瑀
@@ -11,7 +13,11 @@ This repository implements an adaptive replanner for closed-loop Diffusion Polic
 
 ### Why Traditional Replanning Fails in Diffusion Policies
 
-While trajectory-denoising methods (*Diffuser*) and Model Predictive Control (MPC) explicitly model future states and can utilize state-deviation metrics $\|\hat{s}_{t+1} - s_{t+1}\|$ to replan , **Diffusion Policies** condition their action chunks *only* on the current state $s_t$ without a next-state prediction head. This open-loop execution mechanism makes them highly vulnerable to unexpected physical disturbances.
+While trajectory-denoising methods (*Diffuser*) and Model Predictive Control (MPC) explicitly model future states, allowing them to utilize state-deviation metrics to trigger replanning:
+
+$$\Vert \hat{s}_{t+1} - s_{t+1} \Vert$$
+
+**Diffusion Policies** condition their action chunks *only* on the current state $s_t$ without a next-state prediction head. This open-loop execution mechanism makes them highly vulnerable to unexpected physical disturbances.
 
 When attempting to introduce adaptive replanning naively, two primary failures collapse the policy:
 
