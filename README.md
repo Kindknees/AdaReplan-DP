@@ -15,7 +15,7 @@ While trajectory-denoising methods (*Diffuser*) and Model Predictive Control (MP
 
 When attempting to introduce adaptive replanning naively, two primary failures collapse the policy:
 
-- **Per-step Replanning ($\text{act\_steps} = 1$) breaks continuity:** Forcing a rewrite at every step completely destroys trajectory smoothness. Since diffusion models are inherently **multimodal**, the agent erratically switches intents mid-task (e.g., oscillating between a left-side and right-side grasp), resulting in catastrophic jitter.
+- **Per-step Replanning (`act_steps = 1`) breaks continuity:** Forcing a rewrite at every step completely destroys trajectory smoothness. Since diffusion models are inherently **multimodal**, the agent erratically switches intents mid-task (e.g., oscillating between a left-side and right-side grasp), resulting in catastrophic jitter.
 
  
 - **Naive Triggers encounter Out-of-Distribution (OOD) states:** Interrupting an action chunk mid-way forces the base policy to generate trajectories from half-executed configurations it never encountered during vanilla open-loop training.
@@ -40,7 +40,7 @@ $$\delta_t = r_t + \gamma V_\theta(s_{t+1}) - V_\theta(s_t)$$
 A pooled Exponential Moving Average (EMA) maintains the running mean ($\mu$) and variance ($\sigma^2$) across parallel rollouts. The execution chunk is aborted and resampled when the normalized z-score drops below a downside threshold $\tau$:
 
 
-$$\text{trigger}(t) = \mathds{1}\left[z_t < -\tau\right], \quad z_t = \frac{\delta_t - \mu}{\sigma}$$
+$$\text{trigger}(t) = \mathbb{1}\left[z_t < -\tau\right], \quad z_t = \frac{\delta_t - \mu}{\sigma}$$
 
 
 
