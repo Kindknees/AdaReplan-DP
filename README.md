@@ -123,6 +123,101 @@ source script/set_path.sh
 
 ---
 
+## 5. Usage - Fine-tuning
+
+<!-- ### Set up pre-trained policy -->
+
+<!-- If you did not set the environment variables for pre-training, we need to set them here for fine-tuning. 
+```console
+export DPPO_WANDB_ENTITY=<your_wandb_entity>
+export DPPO_LOG_DIR=<your_prefered_logging_directory>
+``` -->
+<!-- First create a directory as the parent directory of the downloaded checkpoints and set the environment variable for it.
+```console
+export DPPO_LOG_DIR=/path/to/checkpoint
+``` -->
+
+Pre-trained policies in DPPO paper can be found [here](https://drive.google.com/drive/folders/1ZlFqmhxC4S8Xh1pzZ-fXYzS5-P8sfpiP?usp=drive_link). Fine-tuning script will download the default checkpoint automatically to the logging directory.
+ <!-- or you may manually download other ones (different epochs) or use your own pre-trained policy if you like. -->
+
+ <!-- e.g., `${DPPO_LOG_DIR}/gym-pretrain/hopper-medium-v2_pre_diffusion_mlp_ta4_td20/2024-08-26_22-31-03_42/checkpoint/state_0.pt`. -->
+
+<!-- The checkpoint path follows `${DPPO_LOG_DIR}/<benchmark>/<task>/.../<run>/checkpoint/state_<epoch>.pt`. -->
+
+### Fine-tuning pre-trained policy
+
+All the configs can be found under `cfg/<env>/finetune/`. A new WandB project may be created based on `wandb.project` in the config file; set `wandb=null` in the command line to test without WandB logging.
+In this project, we mainly finetuned and evaluated in robomimic env.
+<!-- Running them will download the default pre-trained policy. -->
+<!-- Running the script will download the default pre-trained policy checkpoint specified in the config (`base_policy_path`) automatically, as well as the normalization statistics, to `DPPO_LOG_DIR`.  -->
+- Finetune DPPO:
+```console
+# Robomimic - lift/can/square/transport
+python script/run.py --config-name=ft_ppo_diffusion_mlp \
+    --config-dir=cfg/robomimic/finetune/can
+```
+
+- Finetune D3P:
+```console
+# Robomimic - lift/can/square/transport
+python script/run.py --config-name=ft_d3p_ppo_diffusion_mlp \
+    --config-dir=cfg/robomimic/finetune/can
+```
+
+- Finetune D3P under noisy environment: (or, you can manually add noisy configuration in env wrappers)
+```console
+# Robomimic - lift/can/square/transport
+python script/run.py --config-name=ft_d3p_ppo_diffusion_mlp_noisy \
+    --config-dir=cfg/robomimic/finetune/can
+
+```
+
+- Train RL controller: you must have trained your base diffusion policy before running this
+```console
+# Robomimic - lift/can/square/transport
+python script/run.py --config-name=ft_replan_controller \
+    --config-dir=cfg/robomimic/finetune/can
+```
+
+**Note**: In Gym, Robomimic, and D3IL tasks, we run 40, 50, and 50 parallelized MuJoCo environments on CPU, respectively. If you would like to use fewer environments (given limited CPU threads, or GPU memory for rendering), you can reduce `env.n_envs` and increase `train.n_steps`, so the total number of environment steps collected in each iteration (n_envs x n_steps x act_steps) remains roughly the same. Try to set `train.n_steps` a multiple of `env.max_episode_steps / act_steps`, and be aware that we only count episodes finished within an iteration for eval. Furniture-Bench tasks run IsaacGym on a single GPU.
+
+To fine-tune your own pre-trained policy instead, override `base_policy_path` to your own checkpoint, which is saved under `checkpoint/` of the pre-training directory. You can set `base_policy_path=<path>` in the command line when launching fine-tuning.
+
+<!-- **Note**: If you did not download the pre-training [data](https://drive.google.com/drive/folders/1AXZvNQEKOrp0_jk1VLepKh_oHCg_9e3r?usp=drive_link), you need to download the normalization statistics from it for fine-tuning, e.g., `${DPPO_DATA_DIR}/furniture/round_table_low/normalization.pkl`. -->
+
+See [here](cfg/finetuning.md) for details of the experiments in the paper.
+
+---
+
+## Usage - Evaluation
+Pre-trained or fine-tuned policies can be evaluated without running the fine-tuning script now. Some example configs are provided under `cfg/{gym/robomimic/furniture}/eval}` including ones below. Set `base_policy_path` to override the default checkpoint, and `ft_denoising_steps` needs to match fine-tuning config (otherwise assumes `ft_denoising_steps=0`, which means evaluating the pre-trained policy).
+
+- Vanilla
+```console
+python script/run.py --config-name=eval_diffusion_mlp \
+    --config-dir=cfg/robomimic/eval/can
+```
+
+- D3P
+```console
+python script/run.py --config-name=eval_d3p_diffusion_mlp \
+    --config-dir=cfg/robomimic/eval/can
+```
+
+- TD replanner
+```console
+python script/run.py --config-name=eval_d3p_replan_diffusion_mlp \
+    --config-dir=cfg/robomimic/eval/can
+```
+
+- RL replanner
+```console
+python script/run.py --config-name=eval_replan_controller_noisy_mlp \
+    --config-dir=cfg/robomimic/eval/can
+```
+
+---
+
 ## Acknowledgements
 
 This project was developed as part of the **NYCU 535514 Reinforcement Learning** curriculum at National Yang Ming Chiao Tung University. We build with reproducing the paper [D3P](https://arxiv.org/pdf/2508.06804) .
